@@ -11,6 +11,7 @@
 
 import os
 import sys
+import re
 from PIL import Image
 from scene.cameras import Camera
 
@@ -116,10 +117,23 @@ def readColmapCameras(cam_extrinsics, cam_intrinsics, images_folder):
         image = PILtoTorch(image,None)
         cam_info = CameraInfo(uid=uid, R=R, T=T, FovY=FovY, FovX=FovX, image=image,
                               image_path=image_path, image_name=image_name, width=width, height=height,
-                              time = float(idx/len(cam_extrinsics)), mask=None) # default by monocular settings.
+                              time=0.0, mask=None)
         cam_infos.append(cam_info)
     sys.stdout.write('\n')
     return cam_infos
+
+
+def _colmap_image_sort_key(cam_info):
+    """
+    Sort frame names by numeric index while tolerating names like:
+      left000148.png
+      left000148-checkpoint.png
+    """
+    name = cam_info.image_name
+    match = re.search(r"(\d+)(?:-checkpoint)?$", name)
+    if match:
+        return (0, int(match.group(1)), name)
+    return (1, name)
 
 def fetchPly(path):
     plydata = PlyData.read(path)
@@ -161,7 +175,16 @@ def readColmapSceneInfo(path, images, eval, llffhold=8):
 
     reading_dir = "images" if images == None else images
     cam_infos_unsorted = readColmapCameras(cam_extrinsics=cam_extrinsics, cam_intrinsics=cam_intrinsics, images_folder=os.path.join(path, reading_dir))
-    cam_infos = sorted(cam_infos_unsorted.copy(), key = lambda x : x.image_name)
+    cam_infos = sorted(cam_infos_unsorted.copy(), key=_colmap_image_sort_key)
+
+    # IMPORTANT: assign temporal index after sorting by frame name.
+    # Previously this was assigned before sorting, causing frame/time mismatches
+    # and temporal instability (flicker on moving objects).
+    denom = float(max(1, len(cam_infos)))
+    cam_infos = [
+        cam_info._replace(time=float(idx / denom))
+        for idx, cam_info in enumerate(cam_infos)
+    ]
     # breakpoint()
     if eval:
         train_cam_infos = [c for idx, c in enumerate(cam_infos) if idx % llffhold != 0]
